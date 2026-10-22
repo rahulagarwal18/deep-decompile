@@ -30,13 +30,16 @@
     "@babel/parser": "^7.26.5",
     "@babel/traverse": "^7.26.5",
     "@babel/types": "^7.26.5",
+    "@google/genai": "^2.30.0",
     "chalk": "^5.4.1",
+    "cheerio": "^1.2.0",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "ink": "^5.1.0",
     "js-beautify": "^1.15.1",
     "ora": "^8.2.0",
     "prettier": "^3.5.0",
+    "puppeteer-core": "^25.15.0",
     "source-map": "^0.7.4"
   },
   "devDependencies": {

@@ -4,86 +4,113 @@ import { DecompileOptions, DecompileResult, UnpackedModule } from './types.js';
 import { tryExtractSourceMaps } from './sourcemap/extractor.js';
 import { unpackBundleModules } from './unpacker/bundleUnpacker.js';
 import { deobfuscateAST } from './ast/deobfuscator.js';
+import { reconstructJSX } from './ast/jsxSynthesizer.js';
 import { applySemanticRenaming } from './ai/reconstructor.js';
+import { NeuralDecompiler } from './ai/neuralEngine.js';
+import { harvestWebAssets } from './crawler/harvester.js';
 
 export class DecompilerEngine {
   private options: DecompileOptions;
+  private neuralEngine: NeuralDecompiler;
 
   constructor(options: DecompileOptions) {
     this.options = options;
+    this.neuralEngine = new NeuralDecompiler(options.apiKey);
   }
 
   async run(): Promise<DecompileResult> {
     const startTime = Date.now();
     const outDir = path.resolve(this.options.outputDir);
-
     await fs.mkdir(outDir, { recursive: true });
 
-    // Step 1: Read / Fetch the bundle
-    let bundleCode = '';
-    if (this.options.input.startsWith('http://') || this.options.input.startsWith('https://')) {
-      const response = await fetch(this.options.input);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch bundle from ${this.options.input}: HTTP ${response.status}`);
+    let targets: { urlOrPath: string; content: string }[] = [];
+
+    // Step 1: Detect if input is a Webpage URL (e.g. https://site.com) vs direct JS file
+    const isUrl = this.options.input.startsWith('http://') || this.options.input.startsWith('https://');
+
+    if (isUrl && !this.options.input.endsWith('.js') && !this.options.input.endsWith('.mjs')) {
+      // It's a full website! Harvest all scripts and styles
+      const assets = await harvestWebAssets(this.options.input);
+
+      for (const scriptUrl of assets.scripts.slice(0, 5)) {
+        try {
+          const res = await fetch(scriptUrl);
+          if (res.ok) {
+            targets.push({ urlOrPath: scriptUrl, content: await res.text() });
+          }
+        } catch {
+          // Skip unreachable script
+        }
       }
-      bundleCode = await response.text();
+    } else if (isUrl) {
+      const res = await fetch(this.options.input);
+      if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${this.options.input}`);
+      targets.push({ urlOrPath: this.options.input, content: await res.text() });
     } else {
-      bundleCode = await fs.readFile(path.resolve(this.options.input), 'utf-8');
+      const content = await fs.readFile(path.resolve(this.options.input), 'utf-8');
+      targets.push({ urlOrPath: this.options.input, content });
     }
 
-    // Step 2: Try Source Map Extraction first (Recovers original author files with 100% fidelity)
-    let extractedModules: UnpackedModule[] = [];
-    let sourceMapFound = false;
+    let allModules: UnpackedModule[] = [];
+    let sourcemapFoundOverall = false;
 
-    if (this.options.extractSourceMaps !== false) {
-      const smResult = await tryExtractSourceMaps(bundleCode, this.options.input, outDir);
-      if (smResult.found) {
-        sourceMapFound = true;
-        extractedModules = smResult.modules;
+    // Step 2: Process each discovered bundle
+    for (const target of targets) {
+      // Try sourcemaps
+      if (this.options.extractSourceMaps !== false) {
+        const smResult = await tryExtractSourceMaps(target.content, target.urlOrPath, outDir);
+        if (smResult.found) {
+          sourcemapFoundOverall = true;
+          allModules.push(...smResult.modules);
+          continue; // Recovered from sourcemap, skip manual unpack
+        }
       }
-    }
 
-    // Step 3: If no sourcemap found, perform AST bundle slicing and de-obfuscation
-    if (!sourceMapFound) {
-      const rawModules = unpackBundleModules(bundleCode, outDir);
+      // Manual AST Unpack & Re-synthesis
+      const rawModules = unpackBundleModules(target.content, outDir);
 
       for (const mod of rawModules) {
-        // Run deterministic AST un-minification
-        const deobfuscated = await deobfuscateAST(mod.code);
+        // Pass 1: AST De-obfuscation (un-inline sequences, ternary -> if/else)
+        let processed = await deobfuscateAST(mod.code);
 
-        // Run semantic renaming
-        const semanticCode = await applySemanticRenaming(deobfuscated);
+        // Pass 2: JSX Synthesis (turn _jsx(...) back into <Component />)
+        processed = reconstructJSX(processed);
 
-        extractedModules.push({
+        // Pass 3: Heuristic semantic renaming
+        processed = await applySemanticRenaming(processed);
+
+        // Pass 4: Neural LLM De-anonymizer (if enabled and key present)
+        if (this.options.useAi && this.neuralEngine.isAvailable()) {
+          processed = await this.neuralEngine.decompileFunction(processed);
+        }
+
+        allModules.push({
           ...mod,
-          code: semanticCode
+          code: processed
         });
       }
     }
 
-    // Step 4: Write all reconstructed files to disk with full directory hierarchy
-    for (const mod of extractedModules) {
+    // Step 3: Write files to disk
+    for (const mod of allModules) {
       await fs.mkdir(path.dirname(mod.filePath), { recursive: true });
       await fs.writeFile(mod.filePath, mod.code, 'utf-8');
     }
 
-    // Step 5: Generate a working package.json and tsconfig.json so the output project runs locally
-    await this.generateProjectScaffold(outDir, extractedModules);
-
-    const durationMs = Date.now() - startTime;
+    // Step 4: Generate project runnable scaffold
+    await this.generateProjectScaffold(outDir, allModules);
 
     return {
       sourceUrlOrPath: this.options.input,
       outputDirectory: outDir,
-      sourceMapFound,
-      totalModulesExtracted: extractedModules.length,
-      modules: extractedModules,
-      durationMs
+      sourceMapFound: sourcemapFoundOverall,
+      totalModulesExtracted: allModules.length,
+      modules: allModules,
+      durationMs: Date.now() - startTime
     };
   }
 
   private async generateProjectScaffold(outDir: string, modules: UnpackedModule[]) {
-    // Generate package.json
     const packageJsonPath = path.join(outDir, 'package.json');
     try {
       await fs.access(packageJsonPath);
@@ -100,7 +127,9 @@ export class DecompilerEngine {
         dependencies: {
           react: '^18.3.1',
           'react-dom': '^18.3.1',
-          'lucide-react': '^0.475.0'
+          'lucide-react': '^0.475.0',
+          'clsx': '^2.1.1',
+          'tailwind-merge': '^3.0.1'
         },
         devDependencies: {
           typescript: '^5.7.3',
@@ -111,16 +140,15 @@ export class DecompilerEngine {
       await fs.writeFile(packageJsonPath, JSON.stringify(pkg, null, 2), 'utf-8');
     }
 
-    // Generate README.md
     const readmePath = path.join(outDir, 'DECOMPILED_README.md');
-    const readme = `# Decompiled Project
-Reconstructed automatically using **DeepDecompile** on ${new Date().toISOString()}.
+    const readme = `# ⚡ Decompiled Web Project
+Generated by **DeepDecompile** on ${new Date().toISOString()}.
 
-## Extracted Structure:
-- Total Modules Recovered: ${modules.length}
-- Output Folder: \`decompiled_src/\`
+### 📊 Summary:
+- **Total Modules Reconstructed:** ${modules.length}
+- **Source Code Location:** \`decompiled_src/\`
 
-## Getting Started
+### 🚀 Run this project locally:
 \`\`\`bash
 npm install
 npm run dev
