@@ -1,0 +1,50 @@
+{
+  "name": "deep-decompile",
+  "version": "1.0.0",
+  "description": "Neural reverse-engineering decompiler for minified client-side JavaScript, web bundles, and obfuscated apps into readable TypeScript/React codebases.",
+  "main": "dist/index.js",
+  "bin": {
+    "deep-decompile": "dist/cli.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts"
+  },
+  "keywords": [
+    "decompiler",
+    "reverse-engineering",
+    "ast",
+    "javascript",
+    "typescript",
+    "sourcemap",
+    "beautifier",
+    "clean-code",
+    "bundle-unpacker"
+  ],
+  "author": "Rahul Agarwal <rahulagarwal18>",
+  "license": "MIT",
+  "dependencies": {
+    "@babel/generator": "^7.26.5",
+    "@babel/parser": "^7.26.5",
+    "@babel/traverse": "^7.26.5",
+    "@babel/types": "^7.26.5",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "ink": "^5.1.0",
+    "js-beautify": "^1.15.1",
+    "ora": "^8.2.0",
+    "prettier": "^3.5.0",
+    "source-map": "^0.7.4"
+  },
+  "devDependencies": {
+    "@types/babel__generator": "^7.6.8",
+    "@types/babel__traverse": "^7.20.6",
+    "@types/js-beautify": "^1.14.3",
+    "@types/node": "^22.13.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
