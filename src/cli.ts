@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import path from 'path';
 import { DecompilerEngine } from './engine.js';
+import { startStudioServer } from './studio/server.js';
 
 const program = new Command();
 
@@ -27,11 +28,20 @@ program
   .name('deep-decompile')
   .description('Decompile minified JS, production web bundles, or URLs into clean TypeScript/React repositories')
   .version('1.0.0')
-  .argument('<input>', 'URL or local file path to the bundle/script')
+  .argument('[input]', 'URL or local file path to the bundle/script')
   .option('-o, --out <dir>', 'Output destination directory', './decompiled_output')
+  .option('--ui', 'Launch the visual Cyberpunk DeepDecompile Web Studio')
+  .option('-p, --port <port>', 'Port for the Studio server', '4242')
   .option('--no-sourcemap', 'Skip sourcemap discovery')
-  .option('--ai', 'Enable AI semantic renaming (requires API key)')
-  .action(async (input: string, options: any) => {
+  .option('--ai', 'Enable AI semantic renaming (requires GEMINI_API_KEY)')
+  .action(async (input: string | undefined, options: any) => {
+    // If --ui flag passed, or no arguments provided, launch the visual Studio!
+    if (options.ui || !input) {
+      console.log(chalk.green.bold('✨ Launching DeepDecompile Visual Web Studio...'));
+      startStudioServer(parseInt(options.port, 10));
+      return;
+    }
+
     const spinner = ora({
       text: chalk.yellow(`Fetching and analyzing input: ${input}`),
       color: 'cyan'
