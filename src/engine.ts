@@ -23,6 +23,15 @@ export class DecompilerEngine {
     const outDir = path.resolve(this.options.outputDir);
     await fs.mkdir(outDir, { recursive: true });
 
+    let rawInput = this.options.input.trim();
+    // Auto-normalize URLs missing protocol (e.g. www.aryannewsagency.com -> https://www.aryannewsagency.com)
+    if (!rawInput.startsWith('http://') && !rawInput.startsWith('https://')) {
+      if (rawInput.startsWith('www.') || (rawInput.includes('.') && !rawInput.includes('\\') && !rawInput.includes('/'))) {
+        rawInput = `https://${rawInput}`;
+      }
+    }
+    this.options.input = rawInput;
+
     let targets: { urlOrPath: string; content: string; baseName: string }[] = [];
 
     const isUrl = this.options.input.startsWith('http://') || this.options.input.startsWith('https://');
