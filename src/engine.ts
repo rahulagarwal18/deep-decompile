@@ -23,81 +23,86 @@ export class DecompilerEngine {
     const outDir = path.resolve(this.options.outputDir);
     await fs.mkdir(outDir, { recursive: true });
 
-    let targets: { urlOrPath: string; content: string }[] = [];
+    let targets: { urlOrPath: string; content: string; baseName: string }[] = [];
 
-    // Step 1: Detect if input is a Webpage URL (e.g. https://site.com) vs direct JS file
     const isUrl = this.options.input.startsWith('http://') || this.options.input.startsWith('https://');
 
     if (isUrl && !this.options.input.endsWith('.js') && !this.options.input.endsWith('.mjs')) {
-      // It's a full website! Harvest all scripts and styles
       const assets = await harvestWebAssets(this.options.input);
 
-      for (const scriptUrl of assets.scripts.slice(0, 5)) {
+      for (const scriptUrl of assets.scripts) {
         try {
           const res = await fetch(scriptUrl);
           if (res.ok) {
-            targets.push({ urlOrPath: scriptUrl, content: await res.text() });
+            const urlObj = new URL(scriptUrl);
+            const baseName = path.basename(urlObj.pathname).replace(/\.js$/, '');
+            targets.push({ urlOrPath: scriptUrl, content: await res.text(), baseName });
           }
         } catch {
-          // Skip unreachable script
+          // Skip
         }
       }
     } else if (isUrl) {
       const res = await fetch(this.options.input);
       if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${this.options.input}`);
-      targets.push({ urlOrPath: this.options.input, content: await res.text() });
+      const urlObj = new URL(this.options.input);
+      const baseName = path.basename(urlObj.pathname).replace(/\.js$/, '');
+      targets.push({ urlOrPath: this.options.input, content: await res.text(), baseName });
     } else {
       const content = await fs.readFile(path.resolve(this.options.input), 'utf-8');
-      targets.push({ urlOrPath: this.options.input, content });
+      const baseName = path.basename(this.options.input).replace(/\.js$/, '');
+      targets.push({ urlOrPath: this.options.input, content, baseName });
     }
 
     let allModules: UnpackedModule[] = [];
     let sourcemapFoundOverall = false;
 
-    // Step 2: Process each discovered bundle
     for (const target of targets) {
-      // Try sourcemaps
       if (this.options.extractSourceMaps !== false) {
         const smResult = await tryExtractSourceMaps(target.content, target.urlOrPath, outDir);
         if (smResult.found) {
           sourcemapFoundOverall = true;
           allModules.push(...smResult.modules);
-          continue; // Recovered from sourcemap, skip manual unpack
+          continue;
         }
       }
 
-      // Manual AST Unpack & Re-synthesis
-      const rawModules = unpackBundleModules(target.content, outDir);
-
-      for (const mod of rawModules) {
-        // Pass 1: AST De-obfuscation (un-inline sequences, ternary -> if/else)
-        let processed = await deobfuscateAST(mod.code);
-
-        // Pass 2: JSX Synthesis (turn _jsx(...) back into <Component />)
+      // Check if this bundle is a Webpack push chunk
+      const isWebpack = target.content.includes('webpackChunk');
+      if (isWebpack) {
+        const rawModules = unpackBundleModules(target.content, outDir);
+        for (const mod of rawModules) {
+          let processed = await deobfuscateAST(mod.code);
+          processed = reconstructJSX(processed);
+          processed = await applySemanticRenaming(processed);
+          allModules.push({ ...mod, code: processed });
+        }
+      } else {
+        // Vite / ESM Chunk
+        let processed = await deobfuscateAST(target.content);
         processed = reconstructJSX(processed);
-
-        // Pass 3: Heuristic semantic renaming
         processed = await applySemanticRenaming(processed);
 
-        // Pass 4: Neural LLM De-anonymizer (if enabled and key present)
-        if (this.options.useAi && this.neuralEngine.isAvailable()) {
-          processed = await this.neuralEngine.decompileFunction(processed);
-        }
+        const isComponent = /ArticleModal|SubmitNews|QuickRead|Modal|Admin|Panel|Card|View|React|jsx/.test(target.baseName);
+        const folder = isComponent ? 'components' : 'lib';
+        const ext = isComponent ? '.tsx' : '.ts';
+        const cleanName = target.baseName.replace(/-[A-Za-z0-9_-]{8,}$/, ''); // Strip Vite hash (e.g. -BGWtDsL3)
 
         allModules.push({
-          ...mod,
-          code: processed
+          id: target.baseName,
+          filePath: path.join(outDir, 'decompiled_src', folder, `${cleanName}${ext}`),
+          code: processed,
+          isComponent
         });
       }
     }
 
-    // Step 3: Write files to disk
+    // Write all decompiled modules
     for (const mod of allModules) {
       await fs.mkdir(path.dirname(mod.filePath), { recursive: true });
       await fs.writeFile(mod.filePath, mod.code, 'utf-8');
     }
 
-    // Step 4: Generate project runnable scaffold
     await this.generateProjectScaffold(outDir, allModules);
 
     return {
@@ -127,9 +132,7 @@ export class DecompilerEngine {
         dependencies: {
           react: '^18.3.1',
           'react-dom': '^18.3.1',
-          'lucide-react': '^0.475.0',
-          'clsx': '^2.1.1',
-          'tailwind-merge': '^3.0.1'
+          'lucide-react': '^0.475.0'
         },
         devDependencies: {
           typescript: '^5.7.3',
